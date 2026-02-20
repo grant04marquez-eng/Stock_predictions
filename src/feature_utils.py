@@ -29,7 +29,7 @@ def extract_features():
     ccy_data = web.DataReader(ccy_tickers, 'fred', start=START_DATE, end=END_DATE)
     idx_data = web.DataReader(idx_tickers, 'fred', start=START_DATE, end=END_DATE)
 
-    Y = np.log(stk_data.loc[:, ('Adj Close', 'APPL')]).diff(return_period).shift(-return_period)
+    Y = np.log(stk_data.loc[:, ('Adj Close', 'AAPL')]).diff(return_period).shift(-return_period)
     Y.name = Y.name[-1]+'_Future'
     
     X1 = np.log(stk_data.loc[:, ('Adj Close', ('NVDA', 'AMZN'))]).diff(return_period)
@@ -66,6 +66,7 @@ def get_bitcoin_historical_prices(days = 60):
     df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
     df = df[['Date', 'Close Price (USD)']].set_index('Date')
     return df
+
 
 
 
