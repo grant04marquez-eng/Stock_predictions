@@ -103,7 +103,7 @@ def call_model_api(input_df):
     try:
         raw_pred = predictor.predict(input_df)
         pred_val = pd.DataFrame(raw_pred).values[-1][0]
-       mapping = {-1: "SELL", 0: "HOLD", 1: "BUY"}
+        mapping = {-1: "SELL", 0: "HOLD", 1: "BUY"}
         return mapping.get(pred_val, pred_val), 200
        # return round(float(pred_val), 4), 200
     except Exception as e:
@@ -161,6 +161,7 @@ if submitted:
         display_explanation(input_df,session, aws_bucket)
     else:
         st.error(res)
+
 
 
 
