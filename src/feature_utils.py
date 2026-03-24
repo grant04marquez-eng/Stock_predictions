@@ -53,14 +53,14 @@ def extract_features_pair():
 
     START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
     END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    stk_tickers = ['AAPL', 'AME']
+    stk_tickers = ['NVDA', 'AVGO']
     
     stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
 
-    Y = stk_data.loc[:, ('Adj Close', 'AAPL')]
+    Y = stk_data.loc[:, ('Adj Close', 'NVDA')]
     Y.name = 'AAPL'
 
-    X = stk_data.loc[:, ('Adj Close', 'AME')]
+    X = stk_data.loc[:, ('Adj Close', 'AVGO')]
     X.name = 'AME'
 
     dataset = pd.concat([Y, X], axis=1).dropna()
@@ -87,6 +87,7 @@ def get_bitcoin_historical_prices(days = 60):
     df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
     df = df[['Date', 'Close Price (USD)']].set_index('Date')
     return df
+
 
 
 
