@@ -8,13 +8,12 @@ import posixpath
 import joblib
 import tarfile
 import tempfile
+import json
 
 import boto3
 import sagemaker
 from sagemaker.predictor import Predictor
-from sagemaker.serializers import CSVSerializer
-from sagemaker.deserializers import JSONDeserializer
-from sagemaker.serializers import NumpySerializer
+from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import NumpyDeserializer
 
 from imblearn.pipeline import Pipeline
@@ -25,24 +24,18 @@ import shap
 # Setup & Path Configuration
 warnings.simplefilter("ignore")
 
-# Fix path for Streamlit Cloud (ensure 'src' is findable)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, '..'))
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
-from src.feature_utils import get_bitcoin_historical_prices
-
 # Access the secrets
-aws_id = st.secrets["aws_credentials"]["AWS_ACCESS_KEY_ID"]
-aws_secret = st.secrets["aws_credentials"]["AWS_SECRET_ACCESS_KEY"]
-aws_token = st.secrets["aws_credentials"]["AWS_SESSION_TOKEN"]
-aws_bucket = st.secrets["aws_credentials"]["AWS_BUCKET"]
-aws_endpoint_bitcoin = st.secrets["aws_credentials"]["AWS_ENDPOINT"]
+aws_id      = st.secrets["aws_credentials"]["AWS_ACCESS_KEY_ID"]
+aws_secret  = st.secrets["aws_credentials"]["AWS_SECRET_ACCESS_KEY"]
+aws_token   = st.secrets["aws_credentials"]["AWS_SESSION_TOKEN"]
+aws_bucket  = st.secrets["aws_credentials"]["AWS_BUCKET"]
+aws_endpoint = st.secrets["aws_credentials"]["AWS_ENDPOINT"]
 
+TARGET      = 'AMZN'
+RETURN_PERIOD = 5
 
 # AWS Session Management
-@st.cache_resource # Use this to avoid downloading the file every time the page refreshes
+@st.cache_resource
 def get_session(aws_id, aws_secret, aws_token):
     return boto3.Session(
         aws_access_key_id=aws_id,
@@ -51,131 +44,141 @@ def get_session(aws_id, aws_secret, aws_token):
         region_name='us-east-1'
     )
 
-
-session = get_session(aws_id, aws_secret, aws_token)
-
+session    = get_session(aws_id, aws_secret, aws_token)
 sm_session = sagemaker.Session(boto_session=session)
 
-# Data & Model Configuration
-df_prices = get_bitcoin_historical_prices()
+# Load SP500 data to get realistic price bounds for AMZN
+@st.cache_data
+def load_sp500(_session, bucket):
+    s3_client = _session.client('s3')
+    local_csv  = os.path.join(tempfile.gettempdir(), 'SP500Data.csv')
+    if not os.path.exists(local_csv):
+        s3_client.download_file(
+            Bucket=bucket,
+            Key='SP500Data.csv',
+            Filename=local_csv
+        )
+    return pd.read_csv(local_csv, index_col=0)
 
-# Dynamic bounds for Bitcoin model
-MIN_VAL = 0.5 * df_prices.iloc[:, 0].min()
-MAX_VAL = 2.0 * df_prices.iloc[:, 0].max()
-DEFAULT_VAL = df_prices.iloc[:, 0].mean()
+df_sp500  = load_sp500(session, aws_bucket)
+amzn_prices = df_sp500[TARGET]
+
+MIN_VAL     = float(amzn_prices.min() * 0.5)
+MAX_VAL     = float(amzn_prices.max() * 2.0)
+DEFAULT_VAL = float(amzn_prices.mean())
 
 MODEL_INFO = {
-        "endpoint": aws_endpoint_bitcoin,
-        "explainer": 'explainer_pca.shap',
-        "pipeline": 'finalized_pca_model.tar.gz',
-        "keys": ["Close Price"],
-        "inputs": [{"name": "Close Price", "type": "number", "min": MIN_VAL, "default": DEFAULT_VAL, "step": 100.0}]
+    "endpoint": aws_endpoint,
+    "explainer": 'explainer_pca.shap',
+    "pipeline":  'finalized_pca_model.tar.gz',
+    "inputs": [{"name": "AMZN Close Price", "min": MIN_VAL, "default": DEFAULT_VAL, "step": 10.0}]
 }
 
-def load_pipeline(_session, bucket, key):
-    s3_client = _session.client('s3')
-    filename=MODEL_INFO["pipeline"]
 
-    s3_client.download_file(
-        Filename=filename, 
-        Bucket=bucket, 
-        Key= f"{key}/{os.path.basename(filename)}")
-        # Extract the .joblib file from the .tar.gz
-    with tarfile.open(filename, "r:gz") as tar:
-        tar.extractall(path=".")
+def load_pipeline(_session, bucket, s3_key):
+    s3_client = _session.client('s3')
+    filename  = MODEL_INFO["pipeline"]
+    local_tar = os.path.join(tempfile.gettempdir(), filename)
+
+    s3_client.download_file(Bucket=bucket, Key=f"{s3_key}/{filename}", Filename=local_tar)
+
+    with tarfile.open(local_tar, "r:gz") as tar:
+        tar.extractall(path=tempfile.gettempdir())
         joblib_file = [f for f in tar.getnames() if f.endswith('.joblib')][0]
 
-    # Load the full pipeline
-    return joblib.load(f"{joblib_file}")
+    return joblib.load(os.path.join(tempfile.gettempdir(), joblib_file))
 
-def load_shap_explainer(_session, bucket, key, local_path):
+
+def load_shap_explainer(_session, bucket, s3_key, local_path):
     s3_client = _session.client('s3')
-    local_path = local_path
-
-    # Only download if it doesn't exist locally to save time
     if not os.path.exists(local_path):
-        s3_client.download_file(Filename=local_path, Bucket=bucket, Key=key)
-        
+        s3_client.download_file(Bucket=bucket, Key=s3_key, Filename=local_path)
     with open(local_path, "rb") as f:
         return shap.Explainer.load(f)
 
+
 # Prediction Logic
-def call_model_api(input_df):
-    
+def call_model_api(amzn_price):
+    """
+    Sends the AMZN close price as JSON to the endpoint.
+    The inference_pca.py input_fn handles feature reconstruction.
+    """
     predictor = Predictor(
         endpoint_name=MODEL_INFO["endpoint"],
         sagemaker_session=sm_session,
-        serializer=NumpySerializer(),
-        deserializer=NumpyDeserializer() 
+        serializer=JSONSerializer(),
+        deserializer=NumpyDeserializer()
     )
-    
+
+    payload = json.dumps({TARGET: amzn_price})
+
     try:
-        raw_pred = predictor.predict(input_df)
-        pred_val = pd.DataFrame(raw_pred).values[-1][0]
-        mapping = {-1: "SELL", 0: "HOLD", 1: "BUY"}
-        return mapping.get(pred_val, pred_val), 200
+        raw_pred = predictor.predict(payload)
+        # Option 1 is regression — return the predicted cumulative return
+        pred_val = float(np.array(raw_pred).flatten()[0])
+        return pred_val, 200
     except Exception as e:
         return f"Error: {str(e)}", 500
 
+
 # Local Explainability
-def display_explanation(input_df, session, aws_bucket):
+def display_explanation(amzn_price, session, aws_bucket):
     explainer_name = MODEL_INFO["explainer"]
-    explainer = load_shap_explainer(session, aws_bucket, posixpath.join('explainer', explainer_name),os.path.join(tempfile.gettempdir(), explainer_name))
+    local_explainer = os.path.join(tempfile.gettempdir(), explainer_name)
+    explainer = load_shap_explainer(
+        session, aws_bucket,
+        posixpath.join('explainer', explainer_name),
+        local_explainer
+    )
 
     full_pipeline = load_pipeline(session, aws_bucket, 'sklearn-pipeline-deployment')
-    preprocessing_pipeline = Pipeline(steps=full_pipeline.steps[:-2])
-    input_df_transformed = preprocessing_pipeline.transform(input_df)
-    shap_values = explainer(input_df_transformed)
-    feature_names = full_pipeline[1:5].get_feature_names_out()
 
-    exp = shap.Explanation(
-        values=shap_values[0, :, 0],       # The matrix of SHAP values
-        base_values=explainer.expected_value[0], # The intercept/base value
-        data=input_df_transformed[0],        # The actual feature values for that user
-        feature_names=feature_names        # Your list of names
-        )
+    # Reconstruct the feature row locally for SHAP (same logic as inference_pca.py)
+    closest_date = (df_sp500[TARGET] - amzn_price).abs().idxmin()
+    X_full = np.log(df_sp500.drop([TARGET], axis=1)).diff(RETURN_PERIOD)
+    X_full = np.exp(X_full).cumsum()
+    X_full.columns = [name + '_CR_Cum' for name in X_full.columns]
+    input_row = X_full.loc[[closest_date]]
+
+    # Preprocessing pipeline = everything except the final model step
+    preprocessing_pipeline = Pipeline(steps=full_pipeline.steps[:-1])
+    input_transformed = preprocessing_pipeline.transform(input_row)
+
+    # KernelPCA components don't have named features — label them
+    n_components = input_transformed.shape[1]
+    feature_names = [f'KPC_{i+1}' for i in range(n_components)]
+    input_transformed_df = pd.DataFrame(input_transformed, columns=feature_names)
+
+    shap_values = explainer(input_transformed_df)
 
     st.subheader("🔍 Decision Transparency (SHAP)")
     fig, ax = plt.subplots(figsize=(10, 4))
-    shap.plots.waterfall(exp)
+    shap.plots.waterfall(shap_values[0])
     st.pyplot(fig)
-    # top feature   
-    top_feature = pd.Series(exp.values, index=exp.feature_names).abs().idxmax()
-    st.info(f"**Business Insight:** The most influential factor in this decision was **{top_feature}**.")
+
+    top_feature = pd.Series(shap_values[0].values, index=feature_names).abs().idxmax()
+    st.info(f"**Business Insight:** The most influential factor in this prediction was **{top_feature}**.")
 
 
 # Streamlit UI
 st.set_page_config(page_title="ML Deployment Compiler", layout="wide")
 st.title("👨‍💻 ML Deployment Compiler")
 
-
 with st.form("pred_form"):
-    st.subheader(f"Inputs")
-    cols = st.columns(2)
-    user_inputs = {}
-    
-    for i, inp in enumerate(MODEL_INFO["inputs"]):
-        with cols[i % 2]:
-            user_inputs[inp['name']] = st.number_input(
-                inp['name'].replace('_', ' ').upper(),
-                min_value=inp['min'], value=inp['default'], step=inp['step']
-            )
-    
+    st.subheader("Inputs")
+    inp = MODEL_INFO["inputs"][0]
+    amzn_price = st.number_input(
+        inp["name"].upper(),
+        min_value=inp["min"],
+        value=inp["default"],
+        step=inp["step"]
+    )
     submitted = st.form_submit_button("Run Prediction")
 
 if submitted:
-
-    data_row = [user_inputs[k] for k in MODEL_INFO["keys"]]
-    # Prepare data (Stock predictor uses df_features, Bitcoin uses df_prices)
-    base_df = df_prices
-    input_df = pd.concat([base_df, pd.DataFrame([data_row], columns=base_df.columns)])
-    
-    res, status = call_model_api(input_df)
+    res, status = call_model_api(amzn_price)
     if status == 200:
-        st.metric("Prediction Result", res)
-        display_explanation(input_df,session, aws_bucket)
+        st.metric("Predicted AMZN Cumulative Return", f"{res:.4f}")
+        display_explanation(amzn_price, session, aws_bucket)
     else:
         st.error(res)
-
-
-
