@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import boto3
 import json
+import matplotlib.pyplot as plt
 
 # ── Page Config ──
 st.set_page_config(page_title="Fraud Detection App", page_icon="🔍", layout="wide")
@@ -20,7 +21,6 @@ def load_defaults():
 X_train = load_defaults()
 
 # ── Top features for user input ──
-# These are the most important features from the Random Forest model
 top_features = [
     'TransactionAmt',
     'card1',
@@ -41,7 +41,6 @@ for feat in top_features:
     col_data = X_train[feat]
     min_val = float(col_data.min())
     max_val = float(col_data.max())
-    mean_val = float(col_data.mean())
     median_val = float(col_data.median())
 
     if feat == 'TransactionAmt':
@@ -83,15 +82,9 @@ for feat in top_features:
 
 # ── Build full input row using X_train median for non-top features ──
 input_row = X_train.median().to_dict()
-
-# Override with user inputs
 for feat, val in user_inputs.items():
     input_row[feat] = val
-
-# Recompute derived features
 input_row['TransactionAmt_log'] = float(np.log1p(input_row['TransactionAmt']))
-
-# Convert all values to plain Python floats
 input_row = {k: float(v) for k, v in input_row.items()}
 
 # ── Display input summary ──
@@ -113,6 +106,10 @@ if st.button("🚀 Predict Fraud", type="primary"):
             )
 
             response = runtime.invoke_endpoint(
+                EndpointName='fraud-detection-endpoint',
+                ContentType='application/json',
+                Body=json.dumps([input_row])
+            )
 
             result = json.loads(response['Body'].read().decode())
             prediction = result[0]['prediction']
@@ -120,47 +117,39 @@ if st.button("🚀 Predict Fraud", type="primary"):
 
             # ── Display Results ──
             st.subheader("🎯 Prediction Result")
-
             col1, col2 = st.columns(2)
             with col1:
                 if prediction == 1:
-                    st.error(f"⚠️ **FRAUD DETECTED**")
+                    st.error("⚠️ **FRAUD DETECTED**")
                 else:
-                    st.success(f"✅ **Legitimate Transaction**")
-
+                    st.success("✅ **Legitimate Transaction**")
             with col2:
                 st.metric("Fraud Probability", f"{probability:.2%}")
 
-            # Progress bar for probability
             st.progress(probability)
 
-            # ── SHAP Section ──
-            st.subheader("🔬 SHAP Explanation")
-            st.markdown("Feature importance for this specific prediction:")
+            # ── SHAP-style Feature Importance ──
+            st.subheader("🔬 Feature Impact Analysis")
+            st.markdown("How each input feature deviates from the training median:")
 
-            # Create a simple feature importance display using the top features
-            # and their deviation from the training median
             importance_data = []
             for feat in top_features:
                 user_val = user_inputs[feat]
-                median_val = float(X_train[feat].median())
+                med = float(X_train[feat].median())
                 std_val = float(X_train[feat].std())
                 if std_val > 0:
-                    deviation = (user_val - median_val) / std_val
+                    deviation = (user_val - med) / std_val
                 else:
                     deviation = 0
                 importance_data.append({
                     'Feature': feat,
                     'Your Value': round(user_val, 2),
-                    'Median': round(median_val, 2),
+                    'Median': round(med, 2),
                     'Deviation (σ)': round(deviation, 2)
                 })
 
             imp_df = pd.DataFrame(importance_data)
             st.dataframe(imp_df, use_container_width=True)
-
-            # Bar chart of deviations
-            import matplotlib.pyplot as plt
 
             fig, ax = plt.subplots(figsize=(8, 5))
             colors = ['tomato' if d > 0 else 'steelblue' for d in imp_df['Deviation (σ)']]
@@ -173,7 +162,7 @@ if st.button("🚀 Predict Fraud", type="primary"):
 
         except Exception as e:
             st.error(f"Error calling endpoint: {str(e)}")
-            st.info("Make sure the SageMaker endpoint 'fraud-detection-endpoint' is running.")
+            st.info("Make sure the SageMaker endpoint 'fraud-detection-endpoint' is running and credentials are valid.")
 
 st.markdown("---")
 st.caption("Model: Random Forest | Deployed on AWS SageMaker | Data: IEEE-CIS Fraud Detection Dataset")
