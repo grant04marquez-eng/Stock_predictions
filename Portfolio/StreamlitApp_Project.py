@@ -103,13 +103,16 @@ st.dataframe(input_display, use_container_width=True)
 if st.button("🚀 Predict Fraud", type="primary"):
     with st.spinner("Calling SageMaker endpoint..."):
         try:
-            runtime = boto3.client('sagemaker-runtime', region_name='us-east-1')
+            aws_credentials = st.secrets["aws_credentials"]
+            runtime = boto3.client(
+                'sagemaker-runtime',
+                region_name='us-east-1',
+                aws_access_key_id=aws_credentials["AWS_ACCESS_KEY_ID"],
+                aws_secret_access_key=aws_credentials["AWS_SECRET_ACCESS_KEY"],
+                aws_session_token=aws_credentials["AWS_SESSION_TOKEN"],
+            )
 
             response = runtime.invoke_endpoint(
-                EndpointName='fraud-detection-endpoint',
-                ContentType='application/json',
-                Body=json.dumps([input_row])
-            )
 
             result = json.loads(response['Body'].read().decode())
             prediction = result[0]['prediction']
