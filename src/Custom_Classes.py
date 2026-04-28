@@ -5,8 +5,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import PowerTransformer
 from scipy.stats import skew
 from gensim.models import Word2Vec
-
-
+import spacy
 
 class AutoPowerTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, threshold=0.75):
@@ -242,6 +241,40 @@ class Word2VecTransformer(BaseEstimator, TransformerMixin):
 
         return np.array([get_mean_vector(row[0]) for row in X])
 
+class SpacyVectorTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, model_name='en_core_web_sm'):
+        self.model_name = model_name
+        self.nlp = None
+
+    def fit(self, X, y=None):
+        # Load the model only once to save time
+        if self.nlp is None:
+            try:
+                self.nlp = spacy.load(self.model_name)
+            except OSError:
+                # If the model isn't installed, this reminds them to download it
+                import os
+                os.system(f"python -m spacy download {self.model_name}")
+                self.nlp = spacy.load(self.model_name)
+        return self
+
+    def transform(self, X):
+        # Convert each text to a spaCy document and extract the built-in vector
+        # .vector returns the average of all word vectors in the document (the centroid)
+        return np.array([self.nlp(str(text)).vector for text in X])
+
+class InfToNaNTransformer(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+    
+    def transform(self, X):
+        # Replace positive and negative infinity with NaN
+        X_clean = np.array(X).copy()
+        X_clean[np.isinf(X_clean)] = np.nan
+        return X_clean
+
 # --- Usage Example ---
+# extractor = PairFeatureExtractor(window=60)
+# features_df = extractor.transform(data['AAPL'], data['MSFT'])
 # extractor = PairFeatureExtractor(window=60)
 # features_df = extractor.transform(data['AAPL'], data['MSFT'])
