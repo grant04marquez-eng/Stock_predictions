@@ -53,15 +53,15 @@ def extract_features_pair():
 
     START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
     END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    stk_tickers = ['NVDA', 'AVGO']
+    stk_tickers = ['AAPL', 'MPWR']
     
     stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
 
-    Y = stk_data.loc[:, ('Adj Close', 'NVDA')]
+    Y = stk_data.loc[:, ('Adj Close', 'AAPL')]
     Y.name = 'AAPL'
 
-    X = stk_data.loc[:, ('Adj Close', 'AVGO')]
-    X.name = 'AME'
+    X = stk_data.loc[:, ('Adj Close', 'MPWR')]
+    X.name = 'MPWR'
 
     dataset = pd.concat([Y, X], axis=1).dropna()
     Y = dataset.loc[:, Y.name]
@@ -88,11 +88,42 @@ def get_bitcoin_historical_prices(days = 60):
     df = df[['Date', 'Close Price (USD)']].set_index('Date')
     return df
 
+def get_year(col):
+    return pd.to_numeric(col.iloc[:, 0].str[-4:], errors='coerce').to_frame()
 
+def get_emp_num(col):
+    s = col.iloc[:, 0].str.replace('10+ years', '10', regex=False).str.replace('< 1 year', '0', regex=False)
+    return pd.to_numeric(s.str.split().str[0], errors='coerce').to_frame()
 
+def get_term_num(col):
+    return pd.to_numeric(col.iloc[:, 0].str.replace(' months', '', regex=False), errors='coerce').to_frame()
 
-
-
-
-
+def run_strategy(data_df_ticker):
+    initial_capital = 100000  # Initial capital for trading
+    capital = initial_capital
+    position = 0  # No initial position
+    portfolio_value_current = 0
+    
+    # Track portfolio value over time
+    portfolio_value = []
+    
+    for i in range(1, len(data_df_ticker)):
+        # Buy
+        if data_df_ticker['Buy_Signal'][i] and capital > 0:
+            position = capital / data_df_ticker['Close'][i]
+            capital = 0  # No remaining capital
+    
+        # Sell
+        elif data_df_ticker['Sell_Signal'][i] and position > 0:
+            capital = position * data_df_ticker['Close'][i]
+            position = 0
+    
+        # Track portfolio value
+        if position == 0:
+            portfolio_value_current = capital
+        elif position > 0:
+            portfolio_value_current =  position * data_df_ticker['Close'][i]
+            
+        portfolio_value.append(portfolio_value_current)
+    return portfolio_value
 
